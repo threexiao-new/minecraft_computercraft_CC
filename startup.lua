@@ -1,7 +1,7 @@
 p = peripheral.wrap("front")
 
 local function gdsm(a)
-    for yi = 0, -60, -1 do
+    for yi = 0, -6000, -1 do
         block = coordinate.getBlock(a.x,a.y + yi,a.z)
         if block ~= "minecraft:air" and block ~= "minecraft:cave_air" and block ~= "minecraft:void_air" then
             return(yi)
@@ -52,7 +52,7 @@ local function rotateVector(q, v)
     end
 
 end
-local function laufen(gc1,gc2,pi,joint,foothand1,gc22,pi2,joint2,foothand2,bigleg,smallleg,foot,lang1,lang2,zx,g,s,tf,rfd,lfd,yfd,rightarm,leftarm,yaobu,rightzero,leftzero,yaozero)--,
+local function laufen(gc1,gc2,pi,joint,foothand1,gc22,pi2,joint2,foothand2,bigleg,smallleg,foot,lang1,lang2,zx,g,s,tf,rfd,lfd,yfd,rightarm,leftarm,yaobu,rightzero,leftzero,yaozero,nifoot)--,
     zmzt = 0
     step2 = tf*s*1
     step = 0
@@ -64,7 +64,17 @@ local function laufen(gc1,gc2,pi,joint,foothand1,gc22,pi2,joint2,foothand2,bigle
     rfd = 1
     lfd = 1
     yfd = 1
+
+    if nifoot then
+        ni = -1
+        else
+            ni = 1
+    end
     while true do
+    bsg = gdsm(a1)
+    if bsg ==nil or bsg < -lang1-lang1-lang2 then
+        qifei = true
+    end        
         local jbjl = s
         vorVector = {x = 1, y = 0 , z = 0}
         if redstone.getAnalogInput("back") > 0 then
@@ -116,8 +126,8 @@ local function laufen(gc1,gc2,pi,joint,foothand1,gc22,pi2,joint2,foothand2,bigle
             anadd2 = 0
         end        
             setTurretPitch(rfd*0.6*math.cos((math.pi/(s*tf))*step),rightarm,rightzero)--摆臂
-            setTurretPitch(bisangle+anadd,pi,bigleg)--大腿
-            setTurretPitch2(anadd2,joint,smallleg)--小腿
+            setTurretPitch(bisangle+ni*anadd,pi,bigleg)--大腿
+            setTurretPitch2(ni*anadd2,joint,smallleg)--小腿
             setTurretPitch3(anadd2/2+0.05,foothand1,foot)--脚踝
         zmzt = 0
         if qifei then
@@ -177,8 +187,8 @@ local function laufen(gc1,gc2,pi,joint,foothand1,gc22,pi2,joint2,foothand2,bigle
         end    
             setTurretYaw(yfd*0.4*math.cos((math.pi/(s*tf))*step2),yaobu,yaozero)--腰
             setTurretPitch(lfd*0.6*math.cos((math.pi/(s*tf))*step2),leftarm,leftzero)--摆臂
-            setTurretPitch(bisangle1+anadd1,pi2,bigleg) --大腿
-            setTurretPitch2(anadd21,joint2,smallleg)--小腿
+            setTurretPitch(bisangle1+ni*anadd1,pi2,bigleg) --大腿
+            setTurretPitch2(ni*anadd21,joint2,smallleg)--小腿
             setTurretPitch2(anadd21/2+0.05,foothand2,foot)--脚踝
         zmzt = 0
         if qifei then
@@ -233,11 +243,11 @@ local function xz(force)
     yyb = 0
     qifei = false
     yzy = 0
-    ltf = 1
-    zx = 7
+    ltf = 1.5
+    zx = 8
     tk = 0
     bugao = 2
-    buchang =14
+    buchang =18
     angle66 = 0
     wa = 0
     q2 = ship.getQuaternion()
@@ -262,10 +272,7 @@ local function xz(force)
             pitchb = math.asin(sindb)
     end
     manq = {x = a1.x + xvt.x *5 , y = a1.y , z = a1.z + xvt.z *5 }
-    bsg = gdsm(a1)
-    if bsg ==nil or bsg < -16 then
-        qifei = true
-    end
+
     if redstone.getAnalogInput("front") > 0 and qifei then
         yzy = mass * 30
     --yyb=-math.cos(yewb-(math.pi/2))*mass*20
@@ -303,7 +310,7 @@ function() laufen("kua",                       --胯部频道
 "l1","l4","l6",                                --大腿小腿脚踝频道
 "rroot",                                       --右腿根频道
 "r1","r4","r6",                                --大腿小腿脚踝频道
-0,                                             --大腿角度调零
+0,                                             --大腿角度调零--
 0,                                             --小腿调零
 0,                                             --脚踝调零
 6,                                             --大腿长
@@ -320,10 +327,10 @@ ltf,                                            --频率
 "yao",                                         --腰子频道
 0,                                             --胳膊1调零
 0,                                             --胳膊2调零
-0                                              --腰部调零
+0,                                              --腰部调零
+false                                           --逆足
 
 )
 
-    
 end
 )
