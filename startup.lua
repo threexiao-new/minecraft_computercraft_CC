@@ -1,44 +1,455 @@
-p = peripheral.wrap("front")
+p = peripheral.wrap("top")
+local function screen()
+    player = coordinate.getPlayers(25000)
+    if player ~= nil then
+        for k, v in pairs(player) do
+        guy = v.name
+        if guy == user then
+        return player
+    end 
+    end
 
-local function gdsm(a)
-    for yi = 0, -6000, -1 do
-        block = coordinate.getBlock(a.x,a.y + yi,a.z)
-        if block ~= "minecraft:air" and block ~= "minecraft:cave_air" and block ~= "minecraft:void_air" then
-            return(yi)
+    end
+
+end
+
+local SAFE_DISTANCE = 5
+local DRONE_COLLISION_DISTANCE = 8 
+local GROUND_HEIGHT = 10
+local STEP_DISTANCE = 8
+local FOLLOW_DISTANCE = 15
+local ARRIVAL_THRESHOLD = 30
+local SHIP_DETECTION_RANGE = 2500 
+
+local drones = {} 
+local targets = {} 
+local followMode = {} 
+local ships = {}
+local droneShips = {}
+
+function initDrones(n)
+    for i = 1, n do
+        drones[i] = {
+            id = i,
+            position = {x = 0, y = 0, z = 0},
+            target = {x = 0, y = 0, z = 0},
+            arrived = false,
+            following = false,
+            shipId = nil  -- 存储对应的船体ID
+        }
+        targets[i] = {x = 0, y = 0, z = 0}
+        followMode[i] = false
+    end
+end
+
+-- 获取无人机当前位置
+function updateDronePositions()
+    for i = 1, #drones do
+        local success, pos = pcall(function()
+            return p.callRemote("doro"..i, "getPosition")
+        end)
+        if success and pos then
+            drones[i].position = pos
         end
-    end              
-end
--- 添加低通滤波器结构
-local filterState = {}
-
-function initFilter(jointName, alpha)
-    filterState[jointName] = {
-        value = 0,
-        alpha = alpha or 0.3
-    }
+    end
 end
 
-function lowPassFilter(jointName, newValue)
-    if not filterState[jointName] then
-        initFilter(jointName)
+-- 获取船体信息并关联无人机
+function updateShips()
+    ships = {}
+    droneShips = {}
+    
+    local shipData = coordinate.getShips(SHIP_DETECTION_RANGE)
+    if shipData then
+        for k, v in pairs(shipData) do
+            local shipInfo = {
+                id = v.id,
+                slug = v.slug,
+                position = {x = v.x, y = v.y, z = v.z},
+                dimension = v.dimension,
+                bounds = {
+                    min_x = v.min_x, min_y = v.min_y, min_z = v.min_z,
+                    max_x = v.max_x, max_y = v.max_y, max_z = v.max_z
+                }
+            }
+            
+            table.insert(ships, shipInfo)
+            
+            -- 尝试将船体与无人机关联
+            for i = 1, #drones do
+                local dronePos = drones[i].position
+                local dist = calculateDistance(dronePos, shipInfo.position)
+                if dist < 1 then
+                    drones[i].shipId = shipInfo.id
+                    droneShips[i] = shipInfo
+                    break
+                end
+            end
+        end
+    end
+end
+
+function calculateDistance(pos1, pos2)
+    local dx = pos1.x - pos2.x
+    local dy = pos1.y - pos2.y
+    local dz = pos1.z - pos2.z
+    return math.sqrt(dx*dx + dy*dy + dz*dz)
+end
+
+function isPointInShipBounds(point, ship)
+    return point.x >= ship.bounds.min_x and point.x <= ship.bounds.max_x and
+           point.y >= ship.bounds.min_y and point.y <= ship.bounds.max_y and
+           point.z >= ship.bounds.min_z and point.z <= ship.bounds.max_z
+end
+
+function checkShipCollision(position, droneId)
+
+    for dx = -1, 1 do
+        for dy = -1, 1 do
+            for dz = -1, 1 do
+                local checkPos = {
+                    x = position.x + dx,
+                    y = position.y + dy,
+                    z = position.z + dz
+                }
+
+                for _, ship in ipairs(ships) do
+                    -- 排除自身船体
+                    if not (droneShips[droneId] and ship.id == droneShips[droneId].id) then
+                        if isPointInShipBounds(checkPos, ship) then
+                            return true
+                        end
+                    end
+                end
+            end
+        end
     end
     
-    local state = filterState[jointName]
-    state.value = state.alpha * newValue + (1 - state.alpha) * state.value
-    return state.value
+    return false
 end
+
+function checkDroneCollision(position, droneId)
+
+    for j = 1, #drones do
+        if j ~= droneId then
+            local dist = calculateDistance(position, drones[j].position)
+
+            if dist < DRONE_COLLISION_DISTANCE then
+                return true
+            end
+
+            if dist < DRONE_COLLISION_DISTANCE * 1.5 then
+                local toOtherDrone = {
+                    x = drones[j].position.x - position.x,
+                    y = drones[j].position.y - position.y,
+                    z = drones[j].position.z - position.z
+                }
+
+                local targetDist = calculateDistance(drones[droneId].target, drones[j].target)
+                if targetDist < 10 then
+                    return true
+                end
+            end
+        end
+    end
+    
+    return false
+end
+
+function isPositionSafe(position, droneId)
+    if position.y <= GROUND_HEIGHT then
+        return false
+    end
+
+    if checkShipCollision(position, droneId) then
+        return false
+    end
+
+    for dx = -1, 1 do
+        for dy = -1, 1 do
+            for dz = -1, 1 do
+                local checkPos = {
+                    x = position.x + dx,
+                    y = position.y + dy,
+                    z = position.z + dz
+                }
+                
+                local blockName = coordinate.getBlock(checkPos.x, checkPos.y, checkPos.z)
+                if blockName and blockName ~= "air" and blockName ~= "minecraft:air" then
+                    return false
+                end
+            end
+        end
+    end
+
+    if checkDroneCollision(position, droneId) then
+        return false
+    end
+    
+    return true
+end
+
+function findSafeMove(currentPos, targetPos, droneId)
+    local directions = {
+        {x = 1, y = 0, z = 0},   {x = -1, y = 0, z = 0},
+        {x = 0, y = 1, z = 0},   {x = 0, y = -1, z = 0},
+        {x = 0, y = 0, z = 1},   {x = 0, y = 0, z = -1},
+        {x = 1, y = 1, z = 0},   {x = 1, y = -1, z = 0},
+        {x = -1, y = 1, z = 0},  {x = -1, y = -1, z = 0},
+        {x = 1, y = 0, z = 1},   {x = 1, y = 0, z = -1},
+        {x = -1, y = 0, z = 1},  {x = -1, y = 0, z = -1},
+        {x = 0, y = 1, z = 1},   {x = 0, y = 1, z = -1},
+        {x = 0, y = -1, z = 1},  {x = 0, y = -1, z = -1}
+    }
+
+    local toTarget = {
+        x = targetPos.x - currentPos.x,
+        y = targetPos.y - currentPos.y,
+        z = targetPos.z - currentPos.z
+    }
+
+    local length = math.sqrt(toTarget.x*toTarget.x + toTarget.y*toTarget.y + toTarget.z*toTarget.z)
+    if length > 0 then
+        toTarget.x = toTarget.x / length
+        toTarget.y = toTarget.y / length
+        toTarget.z = toTarget.z / length
+    end
+
+    table.sort(directions, function(a, b)
+        local dotA = a.x * toTarget.x + a.y * toTarget.y + a.z * toTarget.z
+        local dotB = b.x * toTarget.x + b.y * toTarget.y + b.z * toTarget.z
+
+        if math.abs(dotA - dotB) > 0.1 then
+            return dotA > dotB
+        end
+
+        local distA = calculateDistance(
+            {x = currentPos.x + a.x, y = currentPos.y + a.y, z = currentPos.z + a.z},
+            targetPos
+        )
+        local distB = calculateDistance(
+            {x = currentPos.x + b.x, y = currentPos.y + b.y, z = currentPos.z + b.z},
+            targetPos
+        )
+        return distA < distB
+    end)
+
+    for _, dir in ipairs(directions) do
+        local newPos = {
+            x = currentPos.x + dir.x * STEP_DISTANCE,
+            y = currentPos.y + dir.y * STEP_DISTANCE,
+            z = currentPos.z + dir.z * STEP_DISTANCE
+        }
+        
+        if isPositionSafe(newPos, droneId) then
+            return newPos
+        end
+    end
+
+    local verticalMoves = {
+        {x = 0, y = 2, z = 0}, {x = 0, y = 3, z = 0}, {x = 0, y = -1, z = 0}
+    }
+    
+    for _, move in ipairs(verticalMoves) do
+        local newPos = {
+            x = currentPos.x + move.x,
+            y = currentPos.y + move.y,
+            z = currentPos.z + move.z
+        }
+        
+        if isPositionSafe(newPos, droneId) then
+            return newPos
+        end
+    end
+
+    local Directions = {
+        {x = 2, y = 0, z = 0}, {x = -2, y = 0, z = 0},
+        {x = 0, y = 0, z = 2}, {x = 0, y = 0, z = -2},
+        {x = 2, y = 2, z = 0}, {x = 2, y = 0, z = 2},
+        {x = -2, y = 2, z = 0}, {x = -2, y = 0, z = 2}
+    }
+    
+    for _, dir in ipairs(Directions) do
+        local newPos = {
+            x = currentPos.x + dir.x,
+            y = currentPos.y + dir.y,
+            z = currentPos.z + dir.z
+        }
+        
+        if isPositionSafe(newPos, droneId) then
+            return newPos
+        end
+    end
+
+    return currentPos
+end
+
+function calculateFollowPosition(dronePos, targetPos)
+    local distance = calculateDistance(dronePos, targetPos)
+    
+    if math.abs(distance - FOLLOW_DISTANCE) <= 2 then
+        return dronePos
+    else
+        local direction = {
+            x = dronePos.x - targetPos.x,
+            y = dronePos.y - targetPos.y,
+            z = dronePos.z - targetPos.z
+        }
+        
+        local length = math.sqrt(direction.x*direction.x + direction.y*direction.y + direction.z*direction.z)
+        if length > 0 then
+            direction.x = direction.x / length
+            direction.y = direction.y / length
+            direction.z = direction.z / length
+        else
+            direction = {x = 1, y = 0, z = 0}
+        end
+
+        local followPos = {
+            x = targetPos.x + direction.x * FOLLOW_DISTANCE,
+            y = targetPos.y + direction.y * FOLLOW_DISTANCE,
+            z = targetPos.z + direction.z * FOLLOW_DISTANCE
+        }
+
+        if followPos.y <= GROUND_HEIGHT then
+            followPos.y = GROUND_HEIGHT + 1
+        end
+        
+        return followPos
+    end
+end
+
+function calculateExpectedPosition(droneId, targetX, targetY, targetZ)
+    local drone = drones[droneId]
+    if not drone then
+        return nil
+    end
+
+    drone.target = {x = targetX, y = targetY, z = targetZ}
+    targets[droneId] = drone.target
+    
+    -- 检查是否启用跟随模式
+    local distanceToTarget = calculateDistance(drone.position, drone.target)
+    
+    if followMode[droneId] then
+        local followPos = calculateFollowPosition(drone.position, drone.target)
+        local expectedPos = findSafeMove(drone.position, followPos, droneId)
+        return expectedPos
+    else
+        if distanceToTarget <= ARRIVAL_THRESHOLD then
+            followMode[droneId] = true
+            drone.following = true
+            return drone.position
+        end
+        
+        -- 计算中间目标点（保持距离）
+        local direction = {
+            x = drone.target.x - drone.position.x,
+            y = drone.target.y - drone.position.y,
+            z = drone.target.z - drone.position.z
+        }
+        
+        -- 归一化方向向量
+        local length = math.sqrt(direction.x*direction.x + direction.y*direction.y + direction.z*direction.z)
+        if length > 0 then
+            direction.x = direction.x / length
+            direction.y = direction.y / length
+            direction.z = direction.z / length
+        else
+            direction = {x = 1, y = 0, z = 0}
+        end
+        local intermediateTarget = {
+            x = drone.target.x - direction.x * ARRIVAL_THRESHOLD,
+            y = drone.target.y - direction.y * ARRIVAL_THRESHOLD,
+            z = drone.target.z - direction.z * ARRIVAL_THRESHOLD
+        }
+        
+        local expectedPos = findSafeMove(drone.position, intermediateTarget, droneId)
+        return expectedPos
+    end
+end
+
+function setDroneTarget(droneId, x, y, z)
+    if drones[droneId] then
+        drones[droneId].target = {x = x, y = y, z = z}
+        targets[droneId] = {x = x, y = y, z = z}
+        followMode[droneId] = false
+        drones[droneId].following = false
+        return true
+    end
+    return false
+end
+
+function setFollowMode(droneId, enable)
+    if drones[droneId] then
+        followMode[droneId] = enable
+        drones[droneId].following = enable
+        return true
+    end
+    return false
+end
+
+function getDronePosition(droneId)
+    if drones[droneId] then
+        return drones[droneId].position
+    end
+    return nil
+end
+
+function getDroneStatus(droneId)
+    if drones[droneId] then
+        local drone = drones[droneId]
+        local distance = calculateDistance(drone.position, drone.target)
+        local status = {
+            position = drone.position,
+            target = drone.target,
+            distanceToTarget = distance,
+            following = drone.following,
+            mode = drone.following and "follow" or "move",
+            shipId = drone.shipId
+        }
+        return status
+    end
+    return nil
+end
+
+
 local function distance(a, b)
     return math.sqrt((b.x-a.x)^2 + (b.y-a.y)^2 + (b.z-a.z)^2)
 end
+function rayCast()
+    local player = screen()
+    if player ~= nil then
+        for k, pos in pairs(player) do
+        for i = 1, 256, 1 do
+            pos.x = pos.x + pos.viewVector.x
+            pos.y = pos.y + pos.viewVector.y
+            pos.z = pos.z + pos.viewVector.z
+            block = coordinate.getBlock(pos.x,pos.y,pos.z)
+            local dis = distance(ship.getWorldspacePosition(),pos)
+            local ship1 = coordinate.getShipsAll(256)
+            for key, value in pairs(ship1) do
+                if ship1 ~= nil and pos.x < value.max_x and pos.x > value.min_x and pos.y < value.max_y and pos.y > value.min_y and pos.z < value.max_z and pos.z > value.min_z and dis > 10 then
+                    return { x = pos.x ,y = pos.y ,z = pos.z }
+                end   
+            end
+            if block ~= "minecraft:air" and block ~= "minecraft:cave_air" and block ~= "minecraft:void_air" and block ~= "minecraft:snow" or i == 256 then
+                return { x = pos.x ,y = pos.y ,z = pos.z }
+            end              
+        end
+              
 
-local function paowux(a,g,s)
-    return {jul = a , taijiao = ((-4*g)/(s*s))*a*a + ((4*g)/s)*a}
+        end
+    end
 end
-local function xlcf(a,b)
-    return a.x*b.x+a.y*b.y+a.z*b.z
+local function postovector(po,target)
+    local dis = distance(po,target)
+    local x = (target.x - po.x)/dis
+    local y = (target.y - po.y)/dis
+    local z = (target.z - po.z)/dis
+    return {x = x , y = y , z = z}
 end
 local function rotateVector(q, v)
-    if q and v then
     local qx, qy, qz, qw = q.x, q.y, q.z, q.w
     local tx = 2 * (qy*v.z - qz*v.y)
     local ty = 2 * (qz*v.x - qx*v.z)
@@ -48,213 +459,30 @@ local function rotateVector(q, v)
         x = v.x + qw*tx + (qy*tz - qz*ty),
         y = v.y + qw*ty + (qz*tx - qx*tz),
         z = v.z + qw*tz + (qx*ty - qy*tx)
-    }        
+    }
+end    
+    playerst=coordinate.getPlayers(1000)
+    for k, v in pairs(playerst) do
+        user = v.name
     end
-
-end
-local function laufen(gc1,gc2,pi,joint,foothand1,gc22,pi2,joint2,foothand2,bigleg,smallleg,foot,lang1,lang2,zx,g,s,tf,rfd,lfd,yfd,rightarm,leftarm,yaobu,rightzero,leftzero,yaozero,nifoot)--,
-    zmzt = 0
-    step2 = tf*s*1
-    step = 0
-    time = 0
-    time2 = 0
-    zmzt = 0
-    move1 = 0
-    move2 = 0
-    rfd = 1
-    lfd = 1
-    yfd = 1
-
-    if nifoot then
-        ni = -1
-        else
-            ni = 1
-    end
-    while true do
-    bsg = gdsm(a1)
-    if bsg ==nil or bsg < -lang1-lang1-lang2 then
-        qifei = true
-    end        
-        local jbjl = s
-        vorVector = {x = 1, y = 0 , z = 0}
-        if redstone.getAnalogInput("back") > 0 then
-            dc = -1
-            else
-                dc = 1
-        end
-        local shipQuat = p.callRemote(gc1,"getQuaternion")
-        local shipPos2 = p.callRemote(gc1,"getPosition")
-        local shipPos = p.callRemote(gc2,"getPosition")
-        local xvt = rotateVector(shipQuat,vorVector)
-        targetPos = {x = shipPos2.x - xvt.x *0.3 , y = shipPos2.y-lang1-lang2 , z = shipPos2.z - xvt.z *0.3 }
-            --commands.execAsync(string.format("particle cosmos:bluethrustedlarge %.1f %.1f %.1f 0.1 0.1 0.1 0.05 10 force @a",shipPos2.x+xvt.x*s, shipPos2.y-lang1-lang2 , shipPos2.z+xvt.z*s))       
-        if redstone.getAnalogInput("front") > 0 or redstone.getAnalogInput("back") > 0 or qifei then   
-            move1 = 0
-        local bujs = step/tf
-        if qifei then
-            kv = {x = shipPos2.x - xvt.x *2 , y = shipPos2.y-lang1-lang2+6 , z = shipPos2.z - xvt.z *2 }
-            else
-            kt = paowux(bujs,g,s)
-            kv = {x = shipPos.x + (bujs*xvt.x-xvt.x*zx)*dc, y = shipPos.y-lang1-lang2 + kt.taijiao+0.4,z = shipPos.z + (bujs*xvt.z-xvt.z*zx)*dc} 
-            --commands.execAsync(string.format("particle cosmos:bluethrustedlarge %.1f %.1f %.1f 0.1 0.1 0.1 0.05 10 force @a",kv.x, kv.y , kv.z))
-
-            if bujs > jbjl and bujs < 2*jbjl then
-                kt = paowux(2 * jbjl - bujs,g,jbjl)
-                kv = {x = shipPos.x + ((2 * jbjl - bujs)*xvt.x-xvt.x*zx)*dc, y = shipPos.y-lang1-lang2 - kt.taijiao+0.4,z = shipPos.z + ((2 * jbjl - bujs)*xvt.z-xvt.z*zx)*dc}        
-            end                     
-        end
-
-        targetPos = kv--{x = shipPos2.x-xvt.x*s , y = shipPos2.y-lang1-lang2 , z = shipPos2.z-xvt.z*s }
-        --print(targetPos.x,targetPos.y,targetPos.z)
-            if bujs > 2 * s then
-                step = 0
-            end     
-        local cj = {x = shipPos.x-targetPos.x,y = shipPos.y-targetPos.y,z = shipPos.z-targetPos.z}
-        local dblang = distance(targetPos,shipPos)
-        if xlcf(cj,xvt) > 0 then
-            bisangle = -math.acos((shipPos.y-targetPos.y)/dblang)       
-            else
-                bisangle = math.acos((shipPos.y-targetPos.y)/dblang) 
-        end
-        if dblang < lang1 + lang2 then
-        local anglecos = (lang2*lang2 - lang1*lang1 - dblang * dblang)/(-2*lang1*dblang)
-        anadd = math.acos(anglecos)
-        local anglesin = (dblang*math.sin(anadd))/lang2
-        anadd2 = math.asin(anglesin)
-        else
-            anadd = 0
-            anadd2 = 0
-        end        
-            setTurretPitch(rfd*0.6*math.cos((math.pi/(s*tf))*step),rightarm,rightzero)--摆臂
-            setTurretPitch(bisangle+ni*anadd,pi,bigleg)--大腿
-            setTurretPitch2(ni*anadd2,joint,smallleg)--小腿
-            setTurretPitch3(anadd2/2+0.05,foothand1,foot)--脚踝
-        zmzt = 0
-        if qifei then
-            step = 0
-            else
-                step = step + 1
-        end
-        
-            else
-                if move1 < 2 then
-                p.callRemote(pi, "setTargetValue", bigleg)
-                p.callRemote(joint, "setTargetValue", smallleg)
-                p.callRemote(foothand1, "setTargetValue", foot)
-                p.callRemote(rightarm, "setTargetValue", rightzero)
-                step = 0                    
-                move1 = move1 + 1
-                end
-
-        end
-        local jbjl = s
-        local shipPos = p.callRemote(gc22,"getPosition")
-        if redstone.getAnalogInput("front") > 0 or redstone.getAnalogInput("back") > 0 or qifei then
-            move2 = 0
-        local bujs = step2/tf
-        if qifei then
-            kv = {x = shipPos2.x - xvt.x *0.3 , y = shipPos2.y-lang1-lang2 , z = shipPos2.z - xvt.z *0.3 }
-            else
-            kt = paowux(bujs,g,s)
-            kv = {x = shipPos.x + (bujs*xvt.x-xvt.x*zx)*dc, y = shipPos.y-lang1-lang2 + kt.taijiao+0.4,z = shipPos.z + (bujs*xvt.z-xvt.z*zx)*dc} 
-            
-            if bujs > jbjl and bujs < 2*jbjl then
-                kt = paowux(2 * jbjl - bujs,g,jbjl)
-                kv = {x = shipPos.x + ((2 * jbjl - bujs)*xvt.x-xvt.x*zx)*dc, y = shipPos.y-lang1-lang2 - kt.taijiao+0.4,z = shipPos.z + ((2 * jbjl - bujs)*xvt.z-xvt.z*zx)*dc}
-                                
-            end                     
-        end
-        targetPos1 = kv
-        
-            if bujs > 2 * s then
-                step2 = 0
-            end     
-        local cj = {x = shipPos.x-targetPos1.x,y = shipPos.y-targetPos1.y,z = shipPos.z-targetPos1.z}
-        local dblang = distance(targetPos1,shipPos)
-        if xlcf(cj,xvt) > 0 then
-            bisangle1 = -math.acos((shipPos.y-targetPos1.y)/dblang)       
-            else
-                bisangle1 = math.acos((shipPos.y-targetPos1.y)/dblang) 
-        end
-        if dblang < lang1 + lang2 then
-        local anglecos = (lang2*lang2 - lang1*lang1 - dblang * dblang)/(-2*lang1*dblang)
-        anadd1 = math.acos(anglecos)
-        local anglesin = (dblang*math.sin(anadd1))/lang2
-        anadd21 = math.asin(anglesin)
-        else
-            anadd1 = 0
-            anadd21 = 0
-        end    
-            setTurretYaw(yfd*0.4*math.cos((math.pi/(s*tf))*step2),yaobu,yaozero)--腰
-            setTurretPitch(lfd*0.6*math.cos((math.pi/(s*tf))*step2),leftarm,leftzero)--摆臂
-            setTurretPitch(bisangle1+ni*anadd1,pi2,bigleg) --大腿
-            setTurretPitch2(ni*anadd21,joint2,smallleg)--小腿
-            setTurretPitch2(anadd21/2+0.05,foothand2,foot)--脚踝
-        zmzt = 0
-        if qifei then
-            step2 = tf*s*1
-            else
-                step2 = step2 + 1
-        end
-            else
-                if move2 < 2 then
-                step2 = tf*s*1
-                p.callRemote(pi2, "setTargetValue", bigleg)
-                p.callRemote(joint2, "setTargetValue", smallleg)
-                p.callRemote(foothand2, "setTargetValue", foot)
-                p.callRemote(leftarm, "setTargetValue", leftzero)
-                p.callRemote(yaobu, "setControlTarget", yaozero)
-  
-                move2 = move2 +1
-                end
-
-        end
-
-    sleep(0)
-    end
-
-end
-
--- 改进的设置函数
-function setTurretYaw(angle, ya, oay)
-    local filteredAngle = lowPassFilter(ya, angle)
-    p.callRemote(ya, "setControlTarget", filteredAngle+oay)
-end
-
-function setTurretPitch(angle, pi, oa)
-    local filteredAngle = lowPassFilter(pi, -angle)
-    p.callRemote(pi, "setTargetValue", filteredAngle+oa)
-end
-
-function setTurretPitch2(angle, pi, oa)
-    local filteredAngle = lowPassFilter(pi, angle)
-    p.callRemote(pi, "setTargetValue", filteredAngle+oa)
-end
-
-function setTurretPitch3(angle, pi , oa)
-    local filteredAngle = lowPassFilter(pi, angle)
-    p.callRemote(pi, "setTargetValue", filteredAngle+oa) 
-end
-
-local function xz(force)
-    vorVector = {x = 1, y = 0 , z = 0}
-    while true do
-    xxb = 0
-    yyb = 0
-    qifei = false
-    yzy = 0
-    ltf = 1.5
-    zx = 8
-    tk = 0
-    bugao = 2
-    buchang =18
-    angle66 = 0
-    wa = 0
-    q2 = ship.getQuaternion()
-    mass=ship.getMass()
-    qq = ship.getOmega()
-    a1=ship.getWorldspacePosition()
-    local xvt = rotateVector(q2,vorVector)
+    print(user)
+local function ff(bianhao,tagetpos)
+    fx = 0
+    fy = 0
+    fz = 0
+    tx = 0
+    ty = 0
+    tz = 0
+    er = 0
+    xa = 0
+    za = 0
+    local vt = {x = 0,y = 0,z = -1}
+    q2 = p.callRemote(bianhao,"getQuaternion")
+    if q2 then
+    qq = p.callRemote(bianhao,"getAngularVelocity")
+    local pos = p.callRemote(bianhao,"getPosition")
+    speed = p.callRemote(bianhao,"getVelocity")
+    local vst = rotateVector(q2, vt)
     w2 = q2.w
     x2 = q2.x
     y2 = q2.y
@@ -271,66 +499,70 @@ local function xz(force)
     else
             pitchb = math.asin(sindb)
     end
-    manq = {x = a1.x + xvt.x *5 , y = a1.y , z = a1.z + xvt.z *5 }
-
-    if redstone.getAnalogInput("front") > 0 and qifei then
-        yzy = mass * 30
-    --yyb=-math.cos(yewb-(math.pi/2))*mass*20
-    --xxb=-math.sin(yewb-(math.pi/2))*mass*20
-    --commands.execAsync("particle cosmos:bluethrustedlarge ~-2.5 ~2 ~2 -0.4 -1 0.4 1 0 force @a")
-    --commands.execAsync("particle cosmos:bluethrustedlarge ~-2.5 ~2 ~-3 -0.4 -1 -0.4 1 0 force @a")
+    
+    distarget = distance(pos,tagetpos)
+    if distarget < 5 then
+        poser = postovector(pos,tagetpos)
+        t = 0.2
+        else
+            t =20
+        poser = postovector(pos,tagetpos)
+    end   
+    if ta then
+    vk = postovector(pos,ta)
+    jd2 = math.acos((vk.x*vst.x+vk.z*vst.z)/(math.sqrt(vk.x^2+vk.z^2)*math.sqrt(vst.x^2+vst.z^2)))
+    jd3 = vk.x*vst.z-vst.x*vk.z
+    if jd3 > 0 then
+    jd3 = 1
     end
-    xb=-math.cos(yewb)*angle66
-    yb=-math.sin(yewb)*angle66  
-        if redstone.getAnalogInput("right") > 0 then
-            wa = 1
-        end
-        if redstone.getAnalogInput("left") > 0 then
-            wa = -1
-        end
-        if redstone.getAnalogInput("bottom") > 0 then
-            yzy = mass * 100
-            --commands.execAsync("particle cosmos:bluethrustedlarge ~-2.5 ~2 ~2 -0.4 -1 0.4 1 0 force @a")
-            --commands.execAsync("particle cosmos:bluethrustedlarge ~-2.5 ~2 ~-3 -0.4 -1 -0.4 1 0 force @a")
-        end
-        rzx = ((4*yb-4*rollb)-qq.x)*mass*force
-        rzy = (wa*4-qq.y)*mass*force
-        rzz = ((4*xb-4*pitchb)-qq.z)*mass*force
-        ship.applyInvariantTorque(rzx,rzy,rzz) 
-        sleep(0)        
-        ship.applyInvariantForce(xxb,yzy,yyb)
+    if jd3<0 then
+    jd3 = -1
+    end
+    if jd3 == 0 then
+    jd3 = 0
+    end
+    er = jd2*jd3
+    angle = math.asin((pos.y - ta.y)/distance(pos,ta))
+    xa = -angle*math.cos(yewb+math.pi/2)
+    za = -angle*math.sin(yewb+math.pi/2)    
+    end
+
+    fx = (poser.x*t-speed.x)*mass
+    fy = (0.7+poser.y*t-speed.y)*mass
+    fz = (poser.z*t-speed.z)*mass
+    tx = (za-rollb-qq.x*0.5)*mass
+    ty = (er*5-qq.y*0.5)*mass
+    tz = (xa-pitchb-qq.z*0.5)*mass
+    
+    p.callRemote(bianhao,"applyInvariantForce",fx,fy,fz)    
+    p.callRemote(bianhao,"applyInvariantTorque",tx,ty,tz)    
+                
     end
 
 end
-parallel.waitForAll(function () xz(
-    400
-) end,
-function() laufen("kua",                       --胯部频道
-"lroot",                                       --左腿根频道
-"l1","l4","l6",                                --大腿小腿脚踝频道
-"rroot",                                       --右腿根频道
-"r1","r4","r6",                                --大腿小腿脚踝频道
-0,                                             --大腿角度调零--
-0,                                             --小腿调零
-0,                                             --脚踝调零
-6,                                             --大腿长
-6,                                             --小腿长
-7,                                             --步伐滞后
-bugao,                                         --抬腿步高
-buchang,                                        --迈步长度
-ltf,                                            --频率
-1,                                             --胳膊1幅度
-1,                                             --胳膊2幅度
-1,                                             --腰部幅度
-"ar2",                                         --胳膊频道1
-"al2",                                         --胳膊频道2
-"yao",                                         --腰子频道
-0,                                             --胳膊1调零
-0,                                             --胳膊2调零
-0,                                              --腰部调零
-false                                           --逆足
+mass = 200000
+initDrones(20)
+while true do
+        updateDronePositions()
+        updateShips()
 
-)
+            for i = 1, #drones do
+                 ta = rayCast()
+                 if ta then
+                    setDroneTarget(i, ta.x, ta.y, ta.z)
+                 end
+            local target = targets[i]
+            local expectedPos = calculateExpectedPosition(i, target.x, target.y, target.z)
+            
+            if expectedPos then
 
+                local modeText = followMode[i] and "follow" or "move"
+                local distance = calculateDistance(drones[i].position, targets[i])
+                print(string.format("doro %d (%s) ex: (%.1f, %.1f, %.1f), ta: %.1f", 
+                    i, modeText, expectedPos.x, expectedPos.y, expectedPos.z, distance))
+                ff("doro"..i.."",expectedPos)
+
+            end
+        end
+    sleep(0)
 end
-)
